@@ -38,8 +38,20 @@ interface ScamAlert { id: string; icon: string; title: string; desc: string; age
 
 // ── API ───────────────────────────────────────────────────────────────────────
 const API_BASE = "https://sdoqztflsdrcowtrrscv.supabase.co/functions/v1/make-server-f4602ef7";
+
+async function getAuthHeader(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (session?.access_token) headers["Authorization"] = `Bearer ${session.access_token}`;
+  return headers;
+}
+
 async function api(path: string, opts?: RequestInit) {
-  const res = await fetch(API_BASE + path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const authHeaders = await getAuthHeader();
+  const res = await fetch(API_BASE + path, {
+    ...opts,
+    headers: { ...authHeaders, ...(opts?.headers ?? {}) },
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -885,16 +897,51 @@ function VerifyTypeScreen({ go }: { go: (s: Screen) => void }) {
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
+async function uploadFileToStorage(file: File): Promise<string | null> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const uid = session?.user?.id ?? "guest";
+    const ext = file.name.split(".").pop() ?? "bin";
+    const path = `${uid}/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("trustai-uploads").upload(path, file, { upsert: true });
+    if (error) { toast.error("Upload failed: " + error.message); return null; }
+    const { data } = supabase.storage.from("trustai-uploads").getPublicUrl(path);
+    return data.publicUrl;
+  } catch {
+    toast.error("Upload failed. Please try again.");
+    return null;
+  }
+}
+
 function UploadScreen({ go, onSubmit }: { go: (s: Screen) => void; onSubmit: (text: string, type: string) => void; }) {
   const [text, setText] = useState("");
   const [drag, setDrag] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = async (file: File) => {
+    setUploading(true);
+    const url = await uploadFileToStorage(file);
+    setUploading(false);
+    if (url) {
+      setText(url);
+      toast.success("File uploaded! Click Analyze to verify.");
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault(); setDrag(false);
+    const file = e.dataTransfer.files[0];
+    if (file) await handleFile(file);
+  };
+
   const methods = [
-    { Icon: Camera, label: "Camera", color: C.blue },
-    { Icon: FileImage, label: "Gallery", color: C.purple },
-    { Icon: Globe, label: "Paste URL", color: C.green },
-    { Icon: QrCode, label: "Scan QR", color: C.amber },
-    { Icon: Mic, label: "Record Voice", color: C.red },
-    { Icon: FileText, label: "Document", color: "#06B6D4" },
+    { Icon: Camera, label: "Camera", color: C.blue, action: () => fileRef.current?.click() },
+    { Icon: FileImage, label: "Gallery", color: C.purple, action: () => fileRef.current?.click() },
+    { Icon: Globe, label: "Paste URL", color: C.green, action: () => { const u = prompt("Paste URL:"); if (u) setText(u); } },
+    { Icon: QrCode, label: "Scan QR", color: C.amber, action: () => toast.info("QR scanning — coming soon!") },
+    { Icon: Mic, label: "Record Voice", color: C.red, action: () => toast.info("Voice recording — coming soon!") },
+    { Icon: FileText, label: "Document", color: "#06B6D4", action: () => fileRef.current?.click() },
   ];
   return (
     <div className="flex flex-col h-full overflow-y-auto" style={{ background: C.bg, scrollbarWidth: "none" }}>
@@ -910,24 +957,33 @@ function UploadScreen({ go, onSubmit }: { go: (s: Screen) => void; onSubmit: (te
         </div>
       </div>
       <div className="px-5 flex flex-col gap-4 pb-10">
-        <motion.div className="rounded-2xl border-2 border-dashed p-8 flex flex-col items-center gap-4"
+        {/* Hidden file input */}
+        <input ref={fileRef} type="file" accept="image/*,application/pdf,audio/*,video/*"
+          className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+
+        <motion.div className="rounded-2xl border-2 border-dashed p-8 flex flex-col items-center gap-4 cursor-pointer"
           animate={{ borderColor: drag ? C.blue : "#CBD5E1", backgroundColor: drag ? C.blueLight : "#ffffff", scale: drag ? 1.02 : 1 }}
           onDragOver={e => { e.preventDefault(); setDrag(true); }}
-          onDragLeave={() => setDrag(false)} onDrop={() => setDrag(false)}>
+          onDragLeave={() => setDrag(false)}
+          onDrop={handleDrop}
+          onClick={() => fileRef.current?.click()}>
           <motion.div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ background: C.blueLight }}
-            animate={{ y: [0, -6, 0] }} transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}>
-            <Upload size={28} style={{ color: C.blue }} />
+            animate={{ y: uploading ? 0 : [0, -6, 0] }} transition={{ duration: 2, repeat: uploading ? 0 : Infinity, ease: "easeInOut" }}>
+            {uploading
+              ? <motion.div animate={{ rotate: 360 }} transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}><RefreshCw size={28} style={{ color: C.blue }} /></motion.div>
+              : <Upload size={28} style={{ color: C.blue }} />}
           </motion.div>
           <div className="text-center">
-            <p style={{ fontWeight: 700, fontSize: 14, color: C.text }}>Drop files here</p>
-            <p style={{ fontSize: 12, color: C.muted }}>or use any method below</p>
+            <p style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{uploading ? "Uploading to Supabase…" : "Drop or tap to upload"}</p>
+            <p style={{ fontSize: 12, color: C.muted }}>Stored securely in Supabase Storage</p>
           </div>
           <span style={{ fontSize: 11, color: "#94A3B8" }}>Images, PDFs, Audio, Video supported</span>
         </motion.div>
+
         <motion.div className="grid grid-cols-3 gap-3" variants={STG} initial="initial" animate="animate">
           {methods.map((m, i) => (
             <motion.button key={i} variants={ITEM} whileTap={{ scale: 0.9 }}
-              onClick={() => toast.info(`${m.label} — coming soon!`)}
+              onClick={m.action}
               className="flex flex-col items-center gap-2 p-4 rounded-2xl"
               style={{ background: "white", border: `1px solid ${C.border}` }}>
               <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: `${m.color}14`, color: m.color }}>
